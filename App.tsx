@@ -2,17 +2,15 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Expense, FixedCost, BudgetData, ModalType } from './types';
 import Card from './components/Card';
+import { supabase } from './services/supabaseClient';
 
 const App: React.FC = () => {
-  const [data, setData] = useState<BudgetData>(() => {
-    const saved = localStorage.getItem('finanza_data');
-    if (saved) return JSON.parse(saved);
-    return {
-      monthlyLimit: 0,
-      fixedCosts: [],
-      expenses: []
-    };
+  const [data, setData] = useState<BudgetData>({
+    monthlyLimit: 0,
+    fixedCosts: [],
+    expenses: []
   });
+  const [loading, setLoading] = useState(true);
 
   const [modal, setModal] = useState<ModalType>(ModalType.NONE);
 
@@ -23,9 +21,38 @@ const App: React.FC = () => {
   const [fixedDesc, setFixedDesc] = useState('');
   const [fixedAmount, setFixedAmount] = useState('');
 
+  // Carregar dados do Supabase ao iniciar
   useEffect(() => {
-    localStorage.setItem('finanza_data', JSON.stringify(data));
-  }, [data]);
+    const fetchData = async () => {
+      setLoading(true);
+
+      const [budgetRes, fixedRes, expensesRes] = await Promise.all([
+        supabase.from('budget_settings').select('*').limit(1).single(),
+        supabase.from('fixed_costs').select('*').order('created_at', { ascending: true }),
+        supabase.from('expenses').select('*').order('date', { ascending: false })
+      ]);
+
+      setData({
+        monthlyLimit: budgetRes.data?.monthly_limit || 0,
+        fixedCosts: fixedRes.data?.map((f: any) => ({
+          id: f.id,
+          description: f.description,
+          amount: Number(f.amount)
+        })) || [],
+        expenses: expensesRes.data?.map((e: any) => ({
+          id: e.id,
+          description: e.description,
+          amount: Number(e.amount),
+          category: e.category,
+          date: e.date
+        })) || []
+      });
+
+      setLoading(false);
+    };
+
+    fetchData();
+  }, []);
 
   const totalFixed = useMemo(() => 
     data.fixedCosts.reduce((acc, curr) => acc + curr.amount, 0), 
@@ -39,49 +66,97 @@ const App: React.FC = () => {
     data.monthlyLimit - totalFixed - totalExpenses, 
   [data.monthlyLimit, totalFixed, totalExpenses]);
 
-  const handleUpdateBudget = (e: React.FormEvent) => {
+  const handleUpdateBudget = async (e: React.FormEvent) => {
     e.preventDefault();
-    setData(prev => ({ ...prev, monthlyLimit: parseFloat(budgetInput) || 0 }));
+    const newLimit = parseFloat(budgetInput) || 0;
+
+    await supabase
+      .from('budget_settings')
+      .update({ monthly_limit: newLimit, updated_at: new Date().toISOString() })
+      .not('id', 'is', null);
+
+    setData(prev => ({ ...prev, monthlyLimit: newLimit }));
     setModal(ModalType.NONE);
   };
 
-  const handleAddExpense = (e: React.FormEvent) => {
+  const handleAddExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!expenseDesc || !expenseAmount) return;
-    const newExpense: Expense = {
-      id: crypto.randomUUID(),
-      description: expenseDesc,
-      amount: parseFloat(expenseAmount),
-      category: 'Geral',
-      date: new Date().toISOString()
-    };
-    setData(prev => ({ ...prev, expenses: [newExpense, ...prev.expenses] }));
+
+    const { data: inserted, error } = await supabase
+      .from('expenses')
+      .insert({
+        description: expenseDesc,
+        amount: parseFloat(expenseAmount),
+        category: 'Geral',
+        date: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (!error && inserted) {
+      const newExpense: Expense = {
+        id: inserted.id,
+        description: inserted.description,
+        amount: Number(inserted.amount),
+        category: inserted.category,
+        date: inserted.date
+      };
+      setData(prev => ({ ...prev, expenses: [newExpense, ...prev.expenses] }));
+    }
+
     setExpenseDesc('');
     setExpenseAmount('');
     setModal(ModalType.NONE);
   };
 
-  const handleAddFixedCost = (e: React.FormEvent) => {
+  const handleAddFixedCost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!fixedDesc || !fixedAmount) return;
-    const newFixed: FixedCost = {
-      id: crypto.randomUUID(),
-      description: fixedDesc,
-      amount: parseFloat(fixedAmount)
-    };
-    setData(prev => ({ ...prev, fixedCosts: [...prev.fixedCosts, newFixed] }));
+
+    const { data: inserted, error } = await supabase
+      .from('fixed_costs')
+      .insert({
+        description: fixedDesc,
+        amount: parseFloat(fixedAmount)
+      })
+      .select()
+      .single();
+
+    if (!error && inserted) {
+      const newFixed: FixedCost = {
+        id: inserted.id,
+        description: inserted.description,
+        amount: Number(inserted.amount)
+      };
+      setData(prev => ({ ...prev, fixedCosts: [...prev.fixedCosts, newFixed] }));
+    }
+
     setFixedDesc('');
     setFixedAmount('');
     setModal(ModalType.NONE);
   };
 
-  const deleteExpense = (id: string) => {
+  const deleteExpense = async (id: string) => {
+    await supabase.from('expenses').delete().eq('id', id);
     setData(prev => ({ ...prev, expenses: prev.expenses.filter(e => e.id !== id) }));
   };
 
-  const deleteFixedCost = (id: string) => {
+  const deleteFixedCost = async (id: string) => {
+    await supabase.from('fixed_costs').delete().eq('id', id);
     setData(prev => ({ ...prev, fixedCosts: prev.fixedCosts.filter(f => f.id !== id) }));
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-500 font-medium">Carregando...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
